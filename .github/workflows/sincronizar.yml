@@ -1,0 +1,139 @@
+# Mantém este repositório igual ao IssaLink do projeto IssaFone (jmvduarte/issaphone),
+# sem precisar de tokens: o issaphone é público, por isso basta ler de lá.
+#   1. README, guia e scripts do servidor (ramo main)
+#   2. Versões novas: APK Android (android-N) e instaladores de computador (desktop-N)
+#   3. Webapp IssaLink no GitHub Pages (https://jmvduarte.github.io/issalink/)
+# Corre de 30 em 30 minutos; também pode ser lançado à mão (Actions → Run workflow).
+name: Sincronizar com o IssaFone
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/sincronizar.yml']
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: sincronizar
+  cancel-in-progress: false
+
+env:
+  ORIGEM: jmvduarte/issaphone
+
+jobs:
+  ficheiros:
+    runs-on: ubuntu-latest
+    outputs:
+      webapp: ${{ steps.webapp.outputs.mudou }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Buscar o código do IssaFone
+        run: git clone -q --depth 1 "https://github.com/${ORIGEM}" /tmp/origem
+
+      - name: README, guia e scripts do servidor
+        run: |
+          cp /tmp/origem/issalink/README.md README.md
+          rm -rf servidor && cp -a /tmp/origem/servidor servidor
+          sed -e 's#github.com/jmvduarte/issaphone/releases#github.com/jmvduarte/issalink/releases#g' \
+              -e 's#raw.githubusercontent.com/jmvduarte/issaphone/main/servidor#raw.githubusercontent.com/jmvduarte/issalink/main/servidor#g' \
+              -e 's#jmvduarte.github.io/issaphone/issalink/#jmvduarte.github.io/issalink/#g' \
+              -e 's#procura a mais recente \*\*issalink-N\*\* e descarrega#abre a versão mais recente e descarrega#' \
+              /tmp/origem/GUIA-SERVIDOR.md > GUIA-SERVIDOR.md
+
+      - name: A webapp mudou?
+        id: webapp
+        run: |
+          versao=$(git -C /tmp/origem log -1 --format=%h -- web)
+          if [ "$versao" != "$(cat .versao-webapp 2>/dev/null)" ]; then
+            echo "$versao" > .versao-webapp
+            echo "mudou=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Gravar alterações
+        run: |
+          git config user.name "IssaLink (automático)"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "Sem alterações"; exit 0; fi
+          git commit -qm "Atualizado a partir de ${ORIGEM}@$(git -C /tmp/origem rev-parse --short HEAD)"
+          git push -q
+
+  webapp:
+    needs: ficheiros
+    if: needs.ficheiros.outputs.webapp == 'true' || github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publicar.outputs.page_url }}
+    steps:
+      - name: Preparar a webapp IssaLink (pede o servidor)
+        run: |
+          git clone -q --depth 1 "https://github.com/${ORIGEM}" /tmp/origem
+          mkdir -p _site
+          cp -a /tmp/origem/web/. _site/
+          sh /tmp/origem/web/marcar.sh _site IssaLink true
+          rm -f _site/marcar.sh
+          sed -i "s/const VERSAO = '.*';/const VERSAO = 'issalink-${GITHUB_SHA::8}';/" _site/sw.js
+          touch _site/.nojekyll
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: publicar
+        uses: actions/deploy-pages@v4
+
+  versoes:
+    needs: ficheiros
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DESTINO: ${{ github.repository }}
+    steps:
+      - name: Android (issalink-N → android-N)
+        run: |
+          N=$(gh api "repos/${ORIGEM}/releases?per_page=60" \
+                --jq '[.[] | select(.tag_name | test("^issalink-[0-9]+$")) | .tag_name | ltrimstr("issalink-") | tonumber] | max // empty')
+          [ -n "$N" ] || { echo "Nenhuma versão Android"; exit 0; }
+          if gh release view "android-$N" -R "$DESTINO" >/dev/null 2>&1; then echo "android-$N já existe"; exit 0; fi
+          mkdir -p apk
+          gh release download "issalink-$N" -R "$ORIGEM" -D apk -p 'IssaLink*.apk'
+          ls -la apk
+          gh release create "android-$N" -R "$DESTINO" --latest \
+            --title "IssaLink para Android 1.0.$N" \
+            --notes "**IssaLink para Android 1.0.$N**: chamadas SIP (voz e vídeo) e chat para qualquer central Issabel 4.
+
+          - Telemóveis atuais: **IssaLink-arm64-v8a.apk** · se não instalar: **IssaLink.apk** (universal).
+          - Entra com o endereço do servidor, a extensão e a palavra-passe. Sem preparar o servidor funcionam só as chamadas (UDP, como o Zoiper); com o [guia](https://github.com/${DESTINO}/blob/main/GUIA-SERVIDOR.md) tens chamadas cifradas, chat, anexos e a webapp." \
+            apk/*
+
+      - name: Computador (issalink-desktop-N → desktop-N)
+        run: |
+          N=$(gh api "repos/${ORIGEM}/releases?per_page=60" \
+                --jq '[.[] | select(.tag_name | test("^issalink-desktop-[0-9]+$")) | .tag_name | ltrimstr("issalink-desktop-") | tonumber] | max // empty')
+          [ -n "$N" ] || { echo "Nenhuma versão de computador"; exit 0; }
+          if gh release view "desktop-$N" -R "$DESTINO" >/dev/null 2>&1; then echo "desktop-$N já existe"; exit 0; fi
+          mkdir -p pc
+          gh release download "issalink-desktop-$N" -R "$ORIGEM" -D pc -p 'IssaLink-*'
+          ls -la pc
+          gh release create "desktop-$N" -R "$DESTINO" --latest=false \
+            --title "IssaLink para computador 1.0.$N" \
+            --notes "**IssaLink para computador 1.0.$N** (Windows e Linux).
+
+          | Sistema | Ficheiro |
+          |---|---|
+          | Windows 10/11 | \`IssaLink-win-x64.exe\` |
+          | Linux (qualquer) | \`IssaLink-linux-x86_64.AppImage\` |
+          | Ubuntu/Debian | \`IssaLink-linux-amd64.deb\` |
+
+          - **Windows:** instalador não assinado: *Mais informações → Executar mesmo assim*.
+          - **AppImage:** \`chmod +x IssaLink-linux-x86_64.AppImage\` · **.deb:** \`sudo apt install ./IssaLink-linux-amd64.deb\`." \
+            pc/*
