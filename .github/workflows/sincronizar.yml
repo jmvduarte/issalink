@@ -137,3 +137,21 @@ jobs:
           - **Windows:** instalador não assinado: *Mais informações → Executar mesmo assim*.
           - **AppImage:** \`chmod +x IssaLink-linux-x86_64.AppImage\` · **.deb:** \`sudo apt install ./IssaLink-linux-amd64.deb\`." \
             pc/*
+
+      # Links fixos para o README: a Release "computador" tem sempre a versão de computador
+      # mais recente (https://github.com/<repo>/releases/download/computador/IssaLink-win-x64.exe).
+      - name: Atalho fixo "computador"
+        run: |
+          N=$(gh api "repos/${DESTINO}/releases?per_page=60" \
+                --jq '[.[] | select(.tag_name | test("^desktop-[0-9]+$")) | .tag_name | ltrimstr("desktop-") | tonumber] | max // empty')
+          [ -n "$N" ] || exit 0
+          if gh release view computador -R "$DESTINO" --json body --jq .body 2>/dev/null | grep -q "(desktop-$N)"; then
+            echo "computador já aponta para desktop-$N"; exit 0
+          fi
+          rm -rf fixo && mkdir fixo
+          gh release download "desktop-$N" -R "$DESTINO" -D fixo -p 'IssaLink-*'
+          gh release delete computador -R "$DESTINO" --cleanup-tag -y 2>/dev/null || true
+          gh release create computador -R "$DESTINO" --latest=false \
+            --title "IssaLink para computador (sempre a mais recente)" \
+            --notes "Versão mais recente para Windows e Linux: 1.0.$N (desktop-$N). Os links desta página são fixos." \
+            fixo/*
